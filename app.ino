@@ -34,7 +34,8 @@ float voltage_samples[10] = { 0 };
 int sample_index = 0;
 float avg_voltage = 0.0;
 const float LOAD_VOLTAGE_THRESHOLD = 0.02;
-const float CHARGING_VOLTAGE_THRESHOLD = 13.5;
+// 충전 감지 전압 임계값을 13.2V로 변경
+const float CHARGING_VOLTAGE_THRESHOLD = 13.2;
 const float CALCULATE_OFFSET = 0.4;
 
 unsigned long discharge_timer = 0;
@@ -354,9 +355,9 @@ float get_reference_voltage_for_level(int level) {
 unsigned long charging_detected_time = 0;
 bool was_charging = false;
 bool charging_notification_played = false;
-const float CHARGING_VOLTAGE_INCREASE = 0.2;
 
 void update_battery_metrics() {
+  // 전압 샘플 업데이트 및 평균 계산
   voltage_samples[sample_index] = batt_voltage;
   sample_index = (sample_index + 1) % 10;
 
@@ -366,53 +367,28 @@ void update_battery_metrics() {
   }
   avg_voltage = sum / 10;
 
-  unsigned long current_time = millis();
-  
-  float reference_voltage = get_reference_voltage_for_level(battery_level);
-  
-  bool is_charging = (avg_voltage >= (reference_voltage + CHARGING_VOLTAGE_INCREASE));
+  // 충전 상태 단순 확인 (13.2V 이상이면 충전 중)
+  bool is_charging = (avg_voltage >= CHARGING_VOLTAGE_THRESHOLD);
   
   if (is_charging && !was_charging) {
+    // 충전 시작 감지
     battery_status = 1;
     was_charging = true;
-    charging_notification_played = false;
-    charging_detected_time = current_time;
-  } else if (is_charging && was_charging && !charging_notification_played && (current_time - charging_detected_time >= 1000)) {
-    mp3_player.play(10);
-    charging_notification_played = true;
+    mp3_player.play(10); // 충전 알림음
   } else if (!is_charging && was_charging) {
+    // 충전 종료 감지
     battery_status = 0;
     was_charging = false;
-    charging_detected_time = current_time;
-  } else if (!is_charging && !was_charging && (current_time - charging_detected_time >= 3000) && (current_time - charging_detected_time <= 3100)) {
-    calculate_battery_level();
-    prev_battery_level = battery_level;
   }
   
-  if (!is_charging) {
-    float reference_voltage = get_reference_voltage_for_level(battery_level);
-    
-    if (reference_voltage - avg_voltage > LOAD_VOLTAGE_THRESHOLD && reference_voltage > voltage) {
-      if (!is_discharging) {
-        is_discharging = true;
-        discharge_timer = current_time;
-      } else if (current_time - discharge_timer >= 4000) {
-        if (battery_level > 0) {
-          battery_level = prev_battery_level - 1;
-          prev_battery_level = battery_level;
-        }
-        discharge_timer = current_time;
-      }
-    } else if (avg_voltage > reference_voltage) {
-      if (is_discharging) {
-        is_discharging = false;
-      }
-    }
-  }
-
+  // 항상 배터리 레벨 계산 (전압에 따라 바로 업데이트)
+  calculate_battery_level();
+  
+  // 배터리 사용량 및 남은 시간 계산
   calculate_battery_usage();
   calculate_time_left();
   
+  // 저전압 감지 및 배터리 사이클 관리
   if (avg_voltage <= LOW_VOLTAGE_THRESHOLD && !low_voltage_detected) {
     battery_cycle++;
     low_voltage_detected = true;
@@ -446,43 +422,40 @@ void calculate_battery_level() {
 float prev_battery_usage = 0;
 
 void calculate_battery_usage() {
-  float reference_voltage = (get_reference_voltage_for_level(battery_level) + batt_voltage) / 2;
-  float voltage_diff = (reference_voltage + 0.15) - batt_voltage;
+  // 참조 전압을 고정된 값(100% 충전 시 전압)으로 설정
+  float reference_voltage = 12.7;  // 완충 상태의 전압으로 고정
+  
+  // 참조 전압과 현재 전압의 차이 계산
+  float voltage_diff = reference_voltage - batt_voltage;
+  
+  // 음수 값은 0으로 처리
   float voltage_drop = (voltage_diff > 0) ? voltage_diff : 0;
-
-  float sensitivity = 15;
-  float power_multiplier = 10.0;
-
-  float estimated_usage;
-  if (voltage_drop > 0.001) {
-    estimated_usage = power_multiplier * (exp(sensitivity * voltage_drop) - 1);
-  } else {
-    estimated_usage = 0;
-  }
-
-  if (estimated_usage > prev_battery_usage) {
-    battery_usage = prev_battery_usage + 1;
-  } else if (estimated_usage < prev_battery_usage) {
-    battery_usage = prev_battery_usage - 1;
-  } else {
-    battery_usage = prev_battery_usage;
-  }
-
-  battery_usage = constrain(battery_usage, 0, battery_max_usage);
-  prev_battery_usage = battery_usage;
+  
+  // 적절한 스케일링을 적용 (전압 차이가 작기 때문에 스케일링 필요)
+  battery_usage = voltage_drop * 150;  // 150을 곱해 더 큰 값으로 표시
+  
+  // 범위 제한 
+  if (battery_usage < 5) battery_usage = 5;  // 최소값 설정
+  battery_usage = constrain(battery_usage, 5, battery_max_usage);
 }
 
+
 void calculate_time_left() {
-  if (battery_usage <= 0) {
+  const float FIXED_POWER_CONSUMPTION = 20.0;  // 고정 20W 소비로 설정
+  
+  if (FIXED_POWER_CONSUMPTION <= 0) {
     time_left = 999;
   } else {
     float battery_wh = battery_capacity * batt_voltage;
-    float adjusted_usage = min(battery_usage, bat_max_usg);
-
-    float hours_left = (battery_wh * battery_level / 100.0) / adjusted_usage;
     float usable_capacity_factor = 1 - (bat_max_usg * 0.01);
-    hours_left = hours_left * usable_capacity_factor;
-
+    
+    // 배터리 레벨을 고려한 사용 가능한 총 와트시
+    float usable_wh = battery_wh * (battery_level / 100.0) * usable_capacity_factor;
+    
+    // 고정 소비량으로 나누어 시간 계산
+    float hours_left = usable_wh / FIXED_POWER_CONSUMPTION;
+    
+    // 정수로 반올림
     time_left = round(hours_left);
     time_left = constrain(time_left, 0, 999);
   }
@@ -516,7 +489,7 @@ unsigned long lastUpdate = 0;
 int toggle = 0;
 
 void update_status_screen() {
-  if (millis() - lastUpdate >= 5000) {
+  if (millis() - lastUpdate >= 3000) {
     lastUpdate = millis();
 
     if (toggle == 0) {
@@ -524,9 +497,9 @@ void update_status_screen() {
     } else if (toggle == 1) {
       NEXTION.print("status.txt=\"PreCond: " + String(bat_preconditioning ? "ON" : "OFF") + "\"");
     } else if (toggle == 2) {
-      NEXTION.print("status.txt=\" " + String(is_discharging ? "NOT CHARGING" : "CHARGING") + "\"");
+      NEXTION.print("status.txt=\" " + String(battery_status ? "CHARGING" : "NOT CHARGING") + "\"");
     } else {
-      NEXTION.print("status.txt=\"Power: " + String(battery_usage, 1) + "W\"");
+      NEXTION.print("status.txt=\"LIMIT1:" + String(bat_max_usg) +"%\"");
     }
 
     send_command("");
@@ -534,7 +507,6 @@ void update_status_screen() {
     toggle = (toggle + 1) % 4;
   }
 }
-
 void load_battery_info() {
   NEXTION.print("t1.txt=\"" + String(batt_voltage, 2) + "v\"");
   send_command("");
@@ -659,6 +631,6 @@ void update_sensor_values() {
 
   gas_value = analogRead(gas_sensor_pin);
 
-  voltage = analogRead(voltage_pin) * (5.0 / 1023.0) * 4.48;
+  voltage = analogRead(voltage_pin) * (5.0 / 1023.0) * 4.3;
   batt_voltage = voltage;
 }
